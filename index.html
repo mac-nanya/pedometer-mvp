@@ -2,359 +2,133 @@
 <html lang="ja">
 <head>
   <meta charset="utf-8">
-  <title>左右振り＋GPS 実験版</title>
+  <title>GPS＋IMU シンプル実験版</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
 
   <style>
-    body {
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-      margin: 0;
-      padding: 1.5rem;
-      line-height: 1.6;
-    }
-    h1 {
-      font-size: 1.4rem;
-      margin-bottom: 0.5rem;
-    }
-    .card {
-      border-radius: 12px;
-      padding: 1rem 1.2rem;
-      box-shadow: 0 2px 6px rgba(0,0,0,0.1);
-      margin-bottom: 1rem;
-    }
-    .label {
-      font-size: 0.9rem;
-      color: #555;
-    }
-    .value {
-      font-size: 1.4rem;
-      font-weight: bold;
-    }
-    .flag {
-      font-size: 1.1rem;
-      font-weight: bold;
-      padding: 0.3rem 0.6rem;
-      border-radius: 999px;
-      display: inline-block;
-      margin-top: 0.2rem;
-    }
-    .flag-on {
-      background: #ff3b30;
-      color: #fff;
-    }
-    .flag-off {
-      background: #e5e5ea;
-      color: #000;
-    }
-    button {
-      font-size: 1rem;
-      padding: 0.6rem 1.2rem;
-      margin-right: 0.5rem;
-      border-radius: 999px;
-      border: none;
-      cursor: pointer;
-    }
-    #start {
-      background: #007aff;
-      color: #fff;
-    }
-    #stop {
-      background: #e5e5ea;
-      color: #000;
-    }
-    .small {
-      font-size: 0.8rem;
-      color: #555;
-    }
-    .mono {
-      font-family: Menlo, Consolas, monospace;
-      font-size: 0.8rem;
-    }
+    body { font-family: -apple-system, system-ui; padding: 1.5rem; }
+    .card { padding: 1rem; margin: 1rem 0; border-radius: 10px; box-shadow: 0 2px 6px rgba(0,0,0,0.1); }
+    .value { font-size: 2rem; font-weight: bold; }
+    button { padding: 0.7rem 1.2rem; margin-right: 0.5rem; border-radius: 999px; font-size: 1rem; border: none; }
+    #start { background: #007aff; color: white; }
+    #stop  { background: #e5e5ea; color: black; }
   </style>
 </head>
 <body>
-  <h1>左右振り＋GPS 実験版</h1>
-  <p>
-    「計測開始」をタップしてから、<br>
-    <strong>縦向きで左右に振る</strong>・<strong>歩く</strong>などを試して、<br>
-    「速度が一定以上のときだけ SHAKE がカウントされるか」を確認します。
-  </p>
 
-  <div class="card">
-    <div class="label">SHAKEカウント（左右振り ＆ 一定速度以上）</div>
-    <div class="value" id="shakeCount">0</div>
-    <div id="shakeFlag" class="flag flag-off">SHAKE: OFF</div>
-  </div>
+<h1>GPS ≥ 1.0 m/s & IMU ピークでカウント</h1>
 
-  <div class="card">
-    <div class="label">センサ状態</div>
-    <div class="mono">
-      portraitLike: <span id="portraitLike">-</span><br>
-      a_vert (上下): <span id="vertVal">-</span> m/s²<br>
-      a_horiz (水平合成): <span id="horizVal">-</span> m/s²
-    </div>
-  </div>
+<div class="card">
+  <div>カウント</div>
+  <div class="value" id="count">0</div>
+</div>
 
-  <div class="card">
-    <div class="label">位置情報</div>
-    <div class="mono">
-      speed (推定): <span id="speedVal">-</span> m/s<br>
-      movingLikeWalk: <span id="movingFlag">-</span><br>
-      GPS status: <span id="gpsStatus">idle</span>
-    </div>
-  </div>
+<div class="card">
+  <div>現在の速度 (m/s)</div>
+  <div class="value" id="speed">0</div>
+</div>
 
-  <p>
-    <button id="start">計測開始</button>
-    <button id="stop">停止</button>
-  </p>
-
-  <p class="small">
-    ※ iOS では、最初に「モーションと向き」「位置情報」両方の許可ダイアログが出ます。<br>
-    ※ 屋内だと GPS が不安定な場合があります。<br>
-    ※ 実験なので、しきい値（SPEED_MIN / HORIZ_MIN など）は試しながら調整できます。
-  </p>
+<p>
+  <button id="start">計測開始</button>
+  <button id="stop">停止</button>
+</p>
 
 <script>
-  let running = false;
-  let shakeCount = 0;
+let running = false;
+let count = 0;
+let currentSpeed = 0;
+let gpsWatchId = null;
 
-  // --- パラメータ（ここを調整して挙動を変えられる） ---
-  const PORTRAIT_GRAVITY_Y_MIN = 0.7; // |gy| がこれ以上なら「縦向きっぽい」
-  const VERT_MAX = 0.8;               // 垂直方向の動きがこれ以下
-  const HORIZ_MIN = 1.5;              // 水平方向の動きがこれ以上 → 左右ブンブン候補
-  const MIN_SHAKE_INTERVAL = 250;     // 同じ左右振りを数える最短間隔 (ms)
+// しきい値（必要ならここだけ調整）
+const SPEED_MIN = 1.0;      // m/s 以上で移動中と判定
+const IMU_MIN = 1.2;        // dynMag のピークしきい値
+let lastPeak = 0;
+const PEAK_INTERVAL = 300;  // 最短ピーク間隔 (ms)
 
-  const SPEED_MIN = 0.5;              // m/s これ以上なら「歩いている／移動している」とみなす（約1.8km/h）
+// 位置情報（速度計算）
+function distanceMeters(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const toRad = x => x * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat/2)**2 +
+            Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+            Math.sin(dLon/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
 
-  // --- 状態変数 ---
-  let lastShakeTime = 0;
-  let shakePhaseHigh = false;
+let lastPos = null;
 
-  let lastPos = null;
-  let currentSpeed = 0;  // m/s
-  let gpsWatchId = null;
+function handlePosition(pos) {
+  const lat = pos.coords.latitude;
+  const lon = pos.coords.longitude;
+  const t = pos.timestamp;
 
-  // --- UI 更新用 ---
-  function setShakeFlag(on) {
-    const el = document.getElementById('shakeFlag');
-    if (on) {
-      el.textContent = 'SHAKE: ON';
-      el.className = 'flag flag-on';
-    } else {
-      el.textContent = 'SHAKE: OFF';
-      el.className = 'flag flag-off';
-    }
+  if (lastPos) {
+    const d = distanceMeters(lastPos.lat, lastPos.lon, lat, lon);
+    const dt = (t - lastPos.t) / 1000;
+    if (dt > 0.4) currentSpeed = d / dt; // m/s
   }
+  lastPos = { lat, lon, t };
+  document.getElementById('speed').textContent = currentSpeed.toFixed(2);
+}
 
-  function updateUIPortrait(isPortraitLike) {
-    document.getElementById('portraitLike').textContent = isPortraitLike ? 'true' : 'false';
-  }
+// IMU ピーク検知
+function handleMotion(e) {
+  if (!running || !e.accelerationIncludingGravity) return;
 
-  function updateUIValues(a_vert, a_horiz) {
-    document.getElementById('vertVal').textContent = a_vert.toFixed(2);
-    document.getElementById('horizVal').textContent = a_horiz.toFixed(2);
-  }
+  const ag = e.accelerationIncludingGravity;
+  const ax = ag.x || 0, ay = ag.y || 0, az = ag.z || 0;
 
-  function updateSpeedUI() {
-    document.getElementById('speedVal').textContent = currentSpeed.toFixed(2);
-    const movingLikeWalk = currentSpeed >= SPEED_MIN;
-    document.getElementById('movingFlag').textContent = movingLikeWalk ? 'true' : 'false';
-  }
+  // 全加速度量 - 重力 → 簡易ピーク
+  const mag = Math.sqrt(ax*ax + ay*ay + az*az);
+  const dyn = Math.abs(mag - 9.8);
 
-  function setGpsStatus(text) {
-    document.getElementById('gpsStatus').textContent = text;
-  }
+  const now = Date.now();
 
-  // --- GPS 距離計算（Haversine） ---
-  function distanceMeters(lat1, lon1, lat2, lon2) {
-    const R = 6371000; // 地球の半径 (m)
-    const toRad = x => x * Math.PI / 180;
-    const dLat = toRad(lat2 - lat1);
-    const dLon = toRad(lon2 - lon1);
-    const a =
-      Math.sin(dLat/2) * Math.sin(dLat/2) +
-      Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
-      Math.sin(dLon/2) * Math.sin(dLon/2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-    return R * c;
-  }
+  if (dyn > IMU_MIN && (now - lastPeak) > PEAK_INTERVAL) {
 
-  function handlePosition(pos) {
-    setGpsStatus('ok');
-
-    const lat = pos.coords.latitude;
-    const lon = pos.coords.longitude;
-    const t = pos.timestamp; // ms
-
-    if (lastPos) {
-      const d = distanceMeters(lastPos.lat, lastPos.lon, lat, lon);
-      const dt = (t - lastPos.t) / 1000; // 秒
-      if (dt > 0.5) { // あまり短すぎるとブレが大きいので0.5秒以上
-        currentSpeed = d / dt; // m/s
-        updateSpeedUI();
-      }
-    }
-    lastPos = { lat, lon, t };
-  }
-
-  function handlePositionError(err) {
-    console.error(err);
-    setGpsStatus('error: ' + err.code);
-  }
-
-  // --- Motion ハンドラ ---
-  function handleMotion(event) {
-    if (!running) return;
-    if (!event.accelerationIncludingGravity) return;
-
-    const ag = event.accelerationIncludingGravity;
-    const axg = ag.x || 0;
-    const ayg = ag.y || 0;
-    const azg = ag.z || 0;
-
-    // 重力方向の単位ベクトル g_hat
-    const gmag = Math.sqrt(axg*axg + ayg*ayg + azg*azg) || 1.0;
-    const gx = axg / gmag;
-    const gy = ayg / gmag;
-    const gz = azg / gmag;
-
-    // 「縦向きっぽいか」判定（重力が y 軸方向に強く出ているか）
-    const isPortraitLike = Math.abs(gy) > PORTRAIT_GRAVITY_Y_MIN;
-    updateUIPortrait(isPortraitLike);
-
-    // 線形加速度（重力除去）を取得
-    let lax = 0, lay = 0, laz = 0;
-
-    if (event.acceleration && event.acceleration.x != null) {
-      // acceleration があればそれを使う
-      lax = event.acceleration.x || 0;
-      lay = event.acceleration.y || 0;
-      laz = event.acceleration.z || 0;
-    } else {
-      // 簡易版：includingGravity から 9.8 m/s^2 を引く
-      const g0 = 9.8;
-      lax = axg - gx * g0;
-      lay = ayg - gy * g0;
-      laz = azg - gz * g0;
+    // ※ GPS 速度が一定以上のときだけカウント
+    if (currentSpeed >= SPEED_MIN) {
+      count++;
+      document.getElementById('count').textContent = count;
     }
 
-    // 垂直成分（重力方向への投影）
-    const a_vert = lax*gx + lay*gy + laz*gz;  // スカラー
-    // 水平方向成分
-    const hx = lax - a_vert * gx;
-    const hy = lay - a_vert * gy;
-    const hz = laz - a_vert * gz;
-    const a_horiz = Math.sqrt(hx*hx + hy*hy + hz*hz);
+    lastPeak = now;
+  }
+}
 
-    updateUIValues(a_vert, a_horiz);
+// start / stop
+document.getElementById('start').onclick = () => {
+  if (running) return;
+  running = true;
 
-    // 「縦向き & 垂直は小さい & 水平は大きい」→ 左右ブンブン候補
-    const isHorizontalShake =
-      isPortraitLike &&
-      Math.abs(a_vert) < VERT_MAX &&
-      a_horiz > HORIZ_MIN;
+  count = 0;
+  document.getElementById('count').textContent = 0;
+  lastPeak = 0;
 
-    const movingLikeWalk = currentSpeed >= SPEED_MIN;
-
-    // 「左右ブンブン & 一定以上の速度」で SHAKE を ON とみなす
-    const shakeActive = isHorizontalShake && movingLikeWalk;
-    setShakeFlag(shakeActive);
-
-    const now = Date.now();
-
-    // しきい値を「下から上」に超えた瞬間だけカウント
-    if (shakeActive && !shakePhaseHigh) {
-      const dt = now - lastShakeTime;
-      if (dt > MIN_SHAKE_INTERVAL) {
-        shakeCount++;
-        lastShakeTime = now;
-        document.getElementById('shakeCount').textContent = shakeCount;
-      }
-      shakePhaseHigh = true;
-    }
-
-    // 条件を下回ったら、次の山待ち
-    if (!shakeActive) {
-      shakePhaseHigh = false;
-    }
+  // motion permission
+  if (typeof DeviceMotionEvent?.requestPermission === 'function') {
+    DeviceMotionEvent.requestPermission().then(r => {
+      if (r === 'granted') window.addEventListener('devicemotion', handleMotion);
+    });
+  } else {
+    window.addEventListener('devicemotion', handleMotion);
   }
 
-  // --- start / stop ---
-  function startMotion() {
-    if (running) return;
-
-    // Motion permission
-    const startDeviceMotion = () => {
-      if ('DeviceMotionEvent' in window) {
-        window.addEventListener('devicemotion', handleMotion);
-        running = true;
-      } else {
-        alert('このブラウザはモーションセンサーに対応していません。');
-      }
-    };
-
-    if (typeof DeviceMotionEvent !== 'undefined' &&
-        typeof DeviceMotionEvent.requestPermission === 'function') {
-      DeviceMotionEvent.requestPermission().then(response => {
-        if (response === 'granted') {
-          startDeviceMotion();
-        } else {
-          alert('モーションセンサーの利用が許可されませんでした。');
-        }
-      }).catch(err => {
-        console.error(err);
-        alert('モーションセンサーの利用許可でエラーが発生しました。');
-      });
-    } else {
-      startDeviceMotion();
-    }
-
-    // GPS watch
-    if (navigator.geolocation) {
-      setGpsStatus('requesting...');
-      gpsWatchId = navigator.geolocation.watchPosition(
-        handlePosition,
-        handlePositionError,
-        {
-          enableHighAccuracy: true,
-          maximumAge: 1000,
-          timeout: 10000
-        }
-      );
-    } else {
-      setGpsStatus('not supported');
-    }
-  }
-
-  function stopMotion() {
-    running = false;
-    window.removeEventListener('devicemotion', handleMotion);
-    setShakeFlag(false);
-
-    if (gpsWatchId !== null && navigator.geolocation) {
-      navigator.geolocation.clearWatch(gpsWatchId);
-      gpsWatchId = null;
-      setGpsStatus('stopped');
-    }
-  }
-
-  document.getElementById('start').addEventListener('click', () => {
-    shakeCount = 0;
-    document.getElementById('shakeCount').textContent = shakeCount;
-    lastShakeTime = 0;
-    shakePhaseHigh = false;
-
-    lastPos = null;
-    currentSpeed = 0;
-    updateSpeedUI();
-
-    startMotion();
+  // GPS watch
+  gpsWatchId = navigator.geolocation.watchPosition(handlePosition, console.error, {
+    enableHighAccuracy: true,
+    maximumAge: 1000,
+    timeout: 10000
   });
+};
 
-  document.getElementById('stop').addEventListener('click', () => {
-    stopMotion();
-  });
+document.getElementById('stop').onclick = () => {
+  running = false;
+  window.removeEventListener('devicemotion', handleMotion);
+  if (gpsWatchId) navigator.geolocation.clearWatch(gpsWatchId);
+};
 </script>
 </body>
 </html>
