@@ -69,17 +69,27 @@
   </p>
 
 <script>
-  let stepCount = 0;
+  let stepCount = 0;        // 画面に表示する歩数
   let running = false;
 
   const buffer = [];
-  const N = 5;                 // 移動平均のサンプル数
+  const N = 5;              // 移動平均のサンプル数
 
-  const THRESHOLD = 1.0;       // しきい値（動的な加速度）。0.8〜1.5くらいで調整
-  const MIN_INTERVAL = 300;    // 1歩の最短間隔 (ms) ＝これより早いのは同じ歩とみなす
+  const THRESHOLD = 1.2;    // 変化加速度のしきい値 (m/s^2) 1.0〜1.5 くらいで調整
+  const MIN_INTERVAL = 350; // 歩の最短間隔 (ms)
+  const MAX_INTERVAL = 1000;// 歩の最長間隔 (ms)
 
+  // 歩行モード判定用
   let lastStepTime = 0;
-  let wasHigh = false;         // 直前サンプルがしきい値より上かどうか
+  let wasHigh = false;
+  let isWalking = false;
+  let candidateSteps = 0;   // 歩行モードに入る前の「候補ステップ数」
+  const WALK_START_STEPS = 3; // 何歩連続で「歩きっぽい」ステップが出たら歩行モードに入るか
+
+  // ステップ間隔の履歴（リズムが安定しているかを見る）
+  const dtHistory = [];
+  const DT_HISTORY_SIZE = 5;
+  const DT_STD_MAX = 200;   // ms これよりバラバラなら「歩行らしくない」とみなす
 
   function handleMotion(event) {
     if (!running) return;
@@ -103,20 +113,71 @@
 
     const now = Date.now();
 
-    // しきい値を「下から上に」超えた瞬間だけを1ステップ候補とする
-    if (filtered > THRESHOLD && !wasHigh) {
-      const dt = now - lastStepTime;
+    // 長時間ピークがないときは歩行モードを解除
+    if (lastStepTime !== 0 && now - lastStepTime > 2000) {
+      isWalking = false;
+      candidateSteps = 0;
+      dtHistory.length = 0;
+    }
 
-      if (dt > MIN_INTERVAL) {
-        stepCount++;
+    // しきい値を「下から上に」超えた瞬間を1ステップ候補とする
+    if (filtered > THRESHOLD && !wasHigh) {
+      const dt = lastStepTime === 0 ? 0 : now - lastStepTime;
+
+      // 初回は基準時間として記録だけする
+      if (lastStepTime === 0) {
         lastStepTime = now;
-        document.getElementById('steps').textContent = stepCount;
+      } else {
+        // 歩行らしい間隔か？
+        if (dt >= MIN_INTERVAL && dt <= MAX_INTERVAL) {
+          // 間隔の履歴に追加
+          dtHistory.push(dt);
+          if (dtHistory.length > DT_HISTORY_SIZE) dtHistory.shift();
+
+          // リズムのバラつきを計算
+          const mean = dtHistory.reduce((a, b) => a + b, 0) / dtHistory.length;
+          const variance = dtHistory.reduce((a, b) => a + (b - mean) * (b - mean), 0) / dtHistory.length;
+          const std = Math.sqrt(variance);
+
+          if (std < DT_STD_MAX) {
+            // 歩行らしい間隔としてカウント
+            if (!isWalking) {
+              candidateSteps++;
+              // 一定数たまったら歩行モードへ
+              if (candidateSteps >= WALK_START_STEPS) {
+                isWalking = true;
+                // これまでの候補ステップを一気に歩数に反映
+                stepCount += candidateSteps;
+                document.getElementById('steps').textContent = stepCount;
+              }
+            } else {
+              // すでに歩行モードなら即カウント
+              stepCount++;
+              document.getElementById('steps').textContent = stepCount;
+            }
+          } else {
+            // リズムがバラバラ → 手振りなどと判断してリセット寄りの挙動
+            if (!isWalking) {
+              candidateSteps = 0;
+              dtHistory.length = 0;
+            }
+          }
+        } else {
+          // 間隔が極端 → 歩行らしくないのでリセット寄り
+          if (!isWalking) {
+            candidateSteps = 0;
+            dtHistory.length = 0;
+          }
+        }
+
+        // 今回を最後のステップ時間として更新
+        lastStepTime = now;
       }
 
       wasHigh = true;
     }
 
-    // 振動が収まって値が十分下がったら、再び山待ち状態に戻す
+    // 振動が収まって値が十分下がったら、次のピーク待ちへ
     if (filtered < THRESHOLD * 0.5) {
       wasHigh = false;
     }
@@ -156,10 +217,14 @@
   document.getElementById('start').addEventListener('click', () => {
     stepCount = 0;
     document.getElementById('steps').textContent = stepCount;
+
     lastStepTime = 0;
     wasHigh = false;
+    isWalking = false;
+    candidateSteps = 0;
     buffer.length = 0;
-    document.getElementById('steps').textContent = stepCount;
+    dtHistory.length = 0;
+
     startMotion();
   });
 
