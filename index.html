@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <title>歩数計 MVP</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      margin: 0;
+      padding: 1.5rem;
+      line-height: 1.6;
+    }
+    h1 {
+      font-size: 1.4rem;
+      margin-bottom: 0.5rem;
+    }
+    .card {
+      border-radius: 12px;
+      padding: 1rem 1.2rem;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+      margin-bottom: 1rem;
+    }
+    .steps {
+      font-size: 2.4rem;
+      font-weight: bold;
+    }
+    button {
+      font-size: 1rem;
+      padding: 0.6rem 1.2rem;
+      margin-right: 0.5rem;
+      border-radius: 999px;
+      border: none;
+      cursor: pointer;
+    }
+    #start {
+      background: #007aff;
+      color: #fff;
+    }
+    #stop {
+      background: #e5e5ea;
+      color: #000;
+    }
+    .small {
+      font-size: 0.8rem;
+      color: #555;
+    }
+  </style>
+</head>
+<body>
+  <h1>歩数計 MVP（ブラウザ版）</h1>
+  <p>「計測開始」をタップしてから、iPhone をポケットに入れて歩いてみてください。</p>
+
+  <div class="card">
+    <div>歩数</div>
+    <div class="steps" id="steps">0</div>
+  </div>
+
+  <p>
+    <button id="start">計測開始</button>
+    <button id="stop">停止</button>
+  </p>
+
+  <p class="small">
+    ※ iOS では、最初に「モーションと向きのアクセスを許可しますか？」と
+    表示されるので「許可」を押してください。<br>
+    ※ 画面を閉じると計測は止まります（MVPデモ仕様）。
+  </p>
+
+  <script>
+    let stepCount = 0;
+    let running = false;
+
+    const buffer = [];
+    const N = 5;                 // 移動平均のサンプル数
+    const THRESHOLD = 1.2;       // しきい値（環境に応じて調整）
+    const MIN_INTERVAL = 300;    // 1歩の最短間隔 (ms)
+    const MAX_INTERVAL = 1200;   // 1歩の最長間隔 (ms)
+    let lastValue = 0;
+    let lastPeakTime = 0;
+
+    function handleMotion(event) {
+      if (!running) return;
+      if (!event.accelerationIncludingGravity) return;
+
+      const acc = event.accelerationIncludingGravity;
+      const ax = acc.x || 0;
+      const ay = acc.y || 0;
+      const az = acc.z || 0;
+
+      // 加速度の大きさ
+      const mag = Math.sqrt(ax*ax + ay*ay + az*az);
+
+      // 簡易移動平均
+      buffer.push(mag);
+      if (buffer.length > N) buffer.shift();
+      const filtered = buffer.reduce((a, b) => a + b, 0) / buffer.length;
+
+      const now = Date.now();
+
+      // しきい値を下から上に超えた瞬間をピークとみなす
+      if (filtered > THRESHOLD && lastValue <= THRESHOLD) {
+        const dt = now - lastPeakTime;
+
+        if (dt > MIN_INTERVAL && dt < MAX_INTERVAL) {
+          stepCount++;
+          document.getElementById('steps').textContent = stepCount;
+          lastPeakTime = now;
+        }
+      }
+
+      lastValue = filtered;
+    }
+
+    function startMotion() {
+      // すでに開始していれば何もしない
+      if (running) return;
+
+      // iOS 13+ のパーミッション対応
+      if (typeof DeviceMotionEvent !== 'undefined' &&
+          typeof DeviceMotionEvent.requestPermission === 'function') {
+
+        DeviceMotionEvent.requestPermission().then(response => {
+          if (response === 'granted') {
+            window.addEventListener('devicemotion', handleMotion);
+            running = true;
+          } else {
+            alert('モーションセンサーの利用が許可されませんでした。');
+          }
+        }).catch(err => {
+          console.error(err);
+          alert('モーションセンサーの利用許可でエラーが発生しました。');
+        });
+
+      } else if ('DeviceMotionEvent' in window) {
+        // Android や古い iOS
+        window.addEventListener('devicemotion', handleMotion);
+        running = true;
+      } else {
+        alert('このブラウザはモーションセンサーに対応していません。');
+      }
+    }
+
+    function stopMotion() {
+      running = false;
+      window.removeEventListener('devicemotion', handleMotion);
+    }
+
+    document.getElementById('start').addEventListener('click', () => {
+      stepCount = 0;
+      document.getElementById('steps').textContent = stepCount;
+      lastPeakTime = 0;
+      lastValue = 0;
+      buffer.length = 0;
+      startMotion();
+    });
+
+    document.getElementById('stop').addEventListener('click', () => {
+      stopMotion();
+    });
+  </script>
+</body>
+</html>
+
