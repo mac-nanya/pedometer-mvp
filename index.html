@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
   <meta charset="utf-8">
-  <title>左右振り検知テスト</title>
+  <title>左右振り検知テスト（加速度＋ジャイロ）</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
 
   <style>
@@ -73,15 +73,15 @@
   </style>
 </head>
 <body>
-  <h1>左右振り検知テスト（縦向きのみ）</h1>
+  <h1>左右振り検知テスト（縦＋水平＋回転）</h1>
   <p>
     「計測開始」をタップしてから、<br>
-    スマホを<strong>縦向き</strong>で<strong>左右に振る</strong>とカウントされるかを確認します。<br>
+    スマホを<strong>縦向き</strong>で<strong>左右に振る</strong>ときにだけカウントされるか確認します。<br>
     そのあと、ポケットに入れて歩いてもカウントされないか試してみてください。
   </p>
 
   <div class="card">
-    <div class="label">左右振りカウント</div>
+    <div class="label">左右振りカウント（手振り検知）</div>
     <div class="value" id="shakeCount">0</div>
     <div id="shakeFlag" class="flag flag-off">SHAKE: OFF</div>
   </div>
@@ -91,7 +91,8 @@
     <div class="mono">
       portraitLike: <span id="portraitLike">-</span><br>
       a_vert (上下): <span id="vertVal">-</span> m/s²<br>
-      a_horiz (水平合成): <span id="horizVal">-</span> m/s²
+      a_horiz (水平合成): <span id="horizVal">-</span> m/s²<br>
+      gyroMag (回転合成): <span id="gyroVal">-</span> deg/s
     </div>
   </div>
 
@@ -102,7 +103,8 @@
 
   <p class="small">
     ※ iOS では、最初に「モーションと向きのアクセスを許可しますか？」と表示されるので「許可」を押してください。<br>
-    ※ 画面を閉じると計測は止まります（テスト用）。
+    ※ 画面を閉じると計測は止まります（テスト用）。<br>
+    ※ 反応具合に応じて下のパラメータ（HORIZ_MIN / GYRO_MIN など）を調整してください。
   </p>
 
 <script>
@@ -112,7 +114,8 @@
   // パラメータ（ここをいじって調整）
   const PORTRAIT_GRAVITY_Y_MIN = 0.7; // |gy| がこれ以上なら「縦向きっぽい」
   const VERT_MAX = 0.8;               // 垂直方向の動きがこれ以下
-  const HORIZ_MIN = 1.5;              // 水平方向の動きがこれ以上 → 左右ブンブン
+  const HORIZ_MIN = 1.5;              // 水平方向の動きがこれ以上 → 左右ブンブン候補
+  const GYRO_MIN = 80;                // 回転合成（deg/s）がこれ以上 → 手振りっぽい
   const MIN_SHAKE_INTERVAL = 250;     // 同じ左右振りを数える最短間隔(ms)
 
   let lastShakeTime = 0;
@@ -122,9 +125,10 @@
     document.getElementById('portraitLike').textContent = isPortraitLike ? 'true' : 'false';
   }
 
-  function updateUIValues(a_vert, a_horiz) {
+  function updateUIValues(a_vert, a_horiz, gyroMag) {
     document.getElementById('vertVal').textContent = a_vert.toFixed(2);
     document.getElementById('horizVal').textContent = a_horiz.toFixed(2);
+    document.getElementById('gyroVal').textContent = gyroMag.toFixed(1);
   }
 
   function setShakeFlag(on) {
@@ -181,13 +185,24 @@
     const hz = laz - a_vert * gz;
     const a_horiz = Math.sqrt(hx*hx + hy*hy + hz*hz);
 
-    updateUIValues(a_vert, a_horiz);
+    // ジャイロ（回転）合成
+    let gyroMag = 0;
+    if (event.rotationRate) {
+      const rr = event.rotationRate;
+      const alpha = rr.alpha || 0; // Z軸回り（垂直軸）
+      const beta  = rr.beta  || 0; // X軸回り
+      const gamma = rr.gamma || 0; // Y軸回り
+      gyroMag = Math.sqrt(alpha*alpha + beta*beta + gamma*gamma);
+    }
 
-    // 「縦向き & 垂直は小さい & 水平は大きい」→ 左右ブンブンの手振り
+    updateUIValues(a_vert, a_horiz, gyroMag);
+
+    // 「縦向き & 垂直は小さい & 水平は大きい & 回転も大きい」→ 左右ブンブンの手振り
     const isHorizontalShake =
       isPortraitLike &&
       Math.abs(a_vert) < VERT_MAX &&
-      a_horiz > HORIZ_MIN;
+      a_horiz > HORIZ_MIN &&
+      gyroMag > GYRO_MIN;
 
     setShakeFlag(isHorizontalShake);
 
@@ -204,7 +219,7 @@
       shakePhaseHigh = true;
     }
 
-    // ある程度しきい値を下回ったら、次の山待ち
+    // しきい値を下回ったら、次の山待ち
     if (!isHorizontalShake) {
       shakePhaseHigh = false;
     }
