@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
   <meta charset="utf-8">
-  <title>歩数計 MVP</title>
+  <title>左右振り検知テスト</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
 
   <style>
@@ -22,9 +22,29 @@
       box-shadow: 0 2px 6px rgba(0,0,0,0.1);
       margin-bottom: 1rem;
     }
-    .steps {
-      font-size: 2.4rem;
+    .label {
+      font-size: 0.9rem;
+      color: #555;
+    }
+    .value {
+      font-size: 1.4rem;
       font-weight: bold;
+    }
+    .flag {
+      font-size: 1.1rem;
+      font-weight: bold;
+      padding: 0.3rem 0.6rem;
+      border-radius: 999px;
+      display: inline-block;
+      margin-top: 0.2rem;
+    }
+    .flag-on {
+      background: #ff3b30;
+      color: #fff;
+    }
+    .flag-off {
+      background: #e5e5ea;
+      color: #000;
     }
     button {
       font-size: 1rem;
@@ -46,15 +66,33 @@
       font-size: 0.8rem;
       color: #555;
     }
+    .mono {
+      font-family: Menlo, Consolas, monospace;
+      font-size: 0.8rem;
+    }
   </style>
 </head>
 <body>
-  <h1>歩数計 MVP（ブラウザ版）</h1>
-  <p>「計測開始」をタップしてから、iPhone をポケットに入れて歩いてみてください。</p>
+  <h1>左右振り検知テスト（縦向きのみ）</h1>
+  <p>
+    「計測開始」をタップしてから、<br>
+    スマホを<strong>縦向き</strong>で<strong>左右に振る</strong>とカウントされるかを確認します。<br>
+    そのあと、ポケットに入れて歩いてもカウントされないか試してみてください。
+  </p>
 
   <div class="card">
-    <div>歩数</div>
-    <div class="steps" id="steps">0</div>
+    <div class="label">左右振りカウント</div>
+    <div class="value" id="shakeCount">0</div>
+    <div id="shakeFlag" class="flag flag-off">SHAKE: OFF</div>
+  </div>
+
+  <div class="card">
+    <div class="label">判定状態</div>
+    <div class="mono">
+      portraitLike: <span id="portraitLike">-</span><br>
+      a_vert (上下): <span id="vertVal">-</span> m/s²<br>
+      a_horiz (水平合成): <span id="horizVal">-</span> m/s²
+    </div>
   </div>
 
   <p>
@@ -63,38 +101,42 @@
   </p>
 
   <p class="small">
-    ※ iOS では、最初に「モーションと向きのアクセスを許可しますか？」と
-    表示されるので「許可」を押してください。<br>
-    ※ 画面を閉じると計測は止まります（MVPデモ仕様）。
+    ※ iOS では、最初に「モーションと向きのアクセスを許可しますか？」と表示されるので「許可」を押してください。<br>
+    ※ 画面を閉じると計測は止まります（テスト用）。
   </p>
 
 <script>
-  let stepCount = 0;        // 画面に表示する歩数
   let running = false;
+  let shakeCount = 0;
 
-  const buffer = [];
-  const N = 5;              // 移動平均のサンプル数
+  // パラメータ（ここをいじって調整）
+  const PORTRAIT_GRAVITY_Y_MIN = 0.7; // |gy| がこれ以上なら「縦向きっぽい」
+  const VERT_MAX = 0.8;               // 垂直方向の動きがこれ以下
+  const HORIZ_MIN = 1.5;              // 水平方向の動きがこれ以上 → 左右ブンブン
+  const MIN_SHAKE_INTERVAL = 250;     // 同じ左右振りを数える最短間隔(ms)
 
-  const THRESHOLD = 1.2;    // 変化加速度のしきい値 (m/s^2) 1.0〜1.5 くらいで調整
-  const MIN_INTERVAL = 350; // 歩の最短間隔 (ms)
-  const MAX_INTERVAL = 1000;// 歩の最長間隔 (ms)
+  let lastShakeTime = 0;
+  let shakePhaseHigh = false;         // しきい値をまたぐためのフラグ
 
-  // 歩行モード判定用
-  let lastStepTime = 0;
-  let wasHigh = false;
-  let isWalking = false;
-  let candidateSteps = 0;   // 歩行モードに入る前の「候補ステップ数」
-  const WALK_START_STEPS = 3; // 何歩連続で「歩きっぽい」ステップが出たら歩行モードに入るか
+  function updateUIPortrait(isPortraitLike) {
+    document.getElementById('portraitLike').textContent = isPortraitLike ? 'true' : 'false';
+  }
 
-  // ステップ間隔の履歴（リズムが安定しているかを見る）
-  const dtHistory = [];
-  const DT_HISTORY_SIZE = 5;
-  const DT_STD_MAX = 200;   // ms これよりバラバラなら「歩行らしくない」とみなす
+  function updateUIValues(a_vert, a_horiz) {
+    document.getElementById('vertVal').textContent = a_vert.toFixed(2);
+    document.getElementById('horizVal').textContent = a_horiz.toFixed(2);
+  }
 
-  // 手振り判定用パラメータ
-  const PORTRAIT_GRAVITY_Y_MIN = 0.7; // |ny| がこれ以上なら「縦向きっぽい」
-  const VERT_MAX = 0.8;              // 垂直方向の動きがこれ以下
-  const HORIZ_MIN = 1.5;             // 水平方向の動きがこれ以上 → 左右ブンブン
+  function setShakeFlag(on) {
+    const el = document.getElementById('shakeFlag');
+    if (on) {
+      el.textContent = 'SHAKE: ON';
+      el.className = 'flag flag-on';
+    } else {
+      el.textContent = 'SHAKE: OFF';
+      el.className = 'flag flag-off';
+    }
+  }
 
   function handleMotion(event) {
     if (!running) return;
@@ -105,137 +147,66 @@
     const ayg = ag.y || 0;
     const azg = ag.z || 0;
 
-    // 重力方向の単位ベクトル g_hat を求める
+    // 重力方向の単位ベクトル g_hat
     const gmag = Math.sqrt(axg*axg + ayg*ayg + azg*azg) || 1.0;
     const gx = axg / gmag;
     const gy = ayg / gmag;
     const gz = azg / gmag;
 
-    // 「縦向きっぽいか」を判定（重力が y 軸方向に強く出ているか）
+    // 「縦向きっぽいか」判定（重力が y 軸方向に強く出ているか）
     const isPortraitLike = Math.abs(gy) > PORTRAIT_GRAVITY_Y_MIN;
+    updateUIPortrait(isPortraitLike);
 
     // 線形加速度（重力除去）を取得
     let lax = 0, lay = 0, laz = 0;
 
     if (event.acceleration && event.acceleration.x != null) {
-      // acceleration があればそのまま使う
+      // acceleration があればそれを使う
       lax = event.acceleration.x || 0;
       lay = event.acceleration.y || 0;
       laz = event.acceleration.z || 0;
     } else {
-      // なければ includingGravity から 9.8 m/s^2 分を引く簡易版
+      // 簡易版：includingGravity から 9.8 m/s^2 を引く
       const g0 = 9.8;
       lax = axg - gx * g0;
       lay = ayg - gy * g0;
       laz = azg - gz * g0;
     }
 
-    // 動的加速度の大きさ
-    const dynMag = Math.sqrt(lax*lax + lay*lay + laz*laz);
-
-    // 垂直成分（重力方向への投影）と水平成分
+    // 垂直成分（重力方向への投影）
     const a_vert = lax*gx + lay*gy + laz*gz;  // スカラー
+    // 水平方向成分
     const hx = lax - a_vert * gx;
     const hy = lay - a_vert * gy;
     const hz = laz - a_vert * gz;
     const a_horiz = Math.sqrt(hx*hx + hy*hy + hz*hz);
 
-    // 「縦向き & 垂直は小さい & 水平は大きい」→ 左右ブンブンの手振りとみなす
+    updateUIValues(a_vert, a_horiz);
+
+    // 「縦向き & 垂直は小さい & 水平は大きい」→ 左右ブンブンの手振り
     const isHorizontalShake =
       isPortraitLike &&
       Math.abs(a_vert) < VERT_MAX &&
       a_horiz > HORIZ_MIN;
 
-    // 左右ブンブン中は、歩行モードに入らないようにする（候補と履歴をリセット気味に）
-    if (isHorizontalShake && !isWalking) {
-      // 手で振っているだけとみなして候補を捨てる
-      candidateSteps = 0;
-      dtHistory.length = 0;
-      // ピーク検出も無効化（次の山待ち）
-      wasHigh = false;
-    }
-
-    // 以降は「動的加速度の大きさ dynMag」を使って歩数検出（従来ロジック）
-    buffer.push(dynMag);
-    if (buffer.length > N) buffer.shift();
-    const filtered = buffer.reduce((a, b) => a + b, 0) / buffer.length;
+    setShakeFlag(isHorizontalShake);
 
     const now = Date.now();
 
-    // 長時間ピークがないときは歩行モードを解除
-    if (lastStepTime !== 0 && now - lastStepTime > 2000) {
-      isWalking = false;
-      candidateSteps = 0;
-      dtHistory.length = 0;
-    }
-
-    // しきい値を「下から上に」超えた瞬間を1ステップ候補とする
-    if (filtered > THRESHOLD && !wasHigh) {
-      const dt = lastStepTime === 0 ? 0 : now - lastStepTime;
-
-      // 初回は基準時間として記録だけする
-      if (lastStepTime === 0) {
-        lastStepTime = now;
-      } else {
-        // 歩行らしい間隔か？
-        if (dt >= MIN_INTERVAL && dt <= MAX_INTERVAL) {
-          // 左右ブンブン中は、ここでもステップ扱いしない（手振り除外）
-          if (isHorizontalShake && !isWalking) {
-            // まだ歩行モードでないときは完全に無視
-            candidateSteps = 0;
-            dtHistory.length = 0;
-          } else {
-            // 間隔の履歴に追加
-            dtHistory.push(dt);
-            if (dtHistory.length > DT_HISTORY_SIZE) dtHistory.shift();
-
-            // リズムのバラつきを計算
-            const mean = dtHistory.reduce((a, b) => a + b, 0) / dtHistory.length;
-            const variance = dtHistory.reduce((a, b) => a + (b - mean) * (b - mean), 0) / dtHistory.length;
-            const std = Math.sqrt(variance);
-
-            if (std < DT_STD_MAX) {
-              // 歩行らしい間隔としてカウント
-              if (!isWalking) {
-                candidateSteps++;
-                // 一定数たまったら歩行モードへ
-                if (candidateSteps >= WALK_START_STEPS) {
-                  isWalking = true;
-                  // これまでの候補ステップを一気に歩数に反映
-                  stepCount += candidateSteps;
-                  document.getElementById('steps').textContent = stepCount;
-                }
-              } else {
-                // すでに歩行モードなら即カウント
-                stepCount++;
-                document.getElementById('steps').textContent = stepCount;
-              }
-            } else {
-              // リズムがバラバラ → 手振りなどと判断してリセット寄りの挙動
-              if (!isWalking) {
-                candidateSteps = 0;
-                dtHistory.length = 0;
-              }
-            }
-          }
-        } else {
-          // 間隔が極端 → 歩行らしくないのでリセット寄り
-          if (!isWalking) {
-            candidateSteps = 0;
-            dtHistory.length = 0;
-          }
-        }
-
-        // 今回を最後のステップ時間として更新
-        lastStepTime = now;
+    // しきい値を「下から上」に超えた瞬間だけカウント
+    if (isHorizontalShake && !shakePhaseHigh) {
+      const dt = now - lastShakeTime;
+      if (dt > MIN_SHAKE_INTERVAL) {
+        shakeCount++;
+        lastShakeTime = now;
+        document.getElementById('shakeCount').textContent = shakeCount;
       }
-
-      wasHigh = true;
+      shakePhaseHigh = true;
     }
 
-    // 振動が収まって値が十分下がったら、次のピーク待ちへ
-    if (filtered < THRESHOLD * 0.5) {
-      wasHigh = false;
+    // ある程度しきい値を下回ったら、次の山待ち
+    if (!isHorizontalShake) {
+      shakePhaseHigh = false;
     }
   }
 
@@ -268,18 +239,14 @@
   function stopMotion() {
     running = false;
     window.removeEventListener('devicemotion', handleMotion);
+    setShakeFlag(false);
   }
 
   document.getElementById('start').addEventListener('click', () => {
-    stepCount = 0;
-    document.getElementById('steps').textContent = stepCount;
-
-    lastStepTime = 0;
-    wasHigh = false;
-    isWalking = false;
-    candidateSteps = 0;
-    buffer.length = 0;
-    dtHistory.length = 0;
+    shakeCount = 0;
+    document.getElementById('shakeCount').textContent = shakeCount;
+    lastShakeTime = 0;
+    shakePhaseHigh = false;
 
     startMotion();
   });
