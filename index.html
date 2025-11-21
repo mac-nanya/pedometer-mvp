@@ -75,45 +75,26 @@
   const buffer = [];
   const N = 5;                 // 移動平均のサンプル数
 
-  // acceleration を使う前提で、少し高めのしきい値にする
-  const THRESHOLD = 2.0;       // (m/s^2) 歩行で越えるくらいに調整
-  const MIN_INTERVAL = 300;    // 1歩の最短間隔 (ms)
-  const MAX_INTERVAL = 1200;   // 1歩の最長間隔 (ms)
-  let lastValue = 0;
-  let lastPeakTime = 0;
+  const THRESHOLD = 1.0;       // しきい値（動的な加速度）。0.8〜1.5くらいで調整
+  const MIN_INTERVAL = 300;    // 1歩の最短間隔 (ms) ＝これより早いのは同じ歩とみなす
+
+  let lastStepTime = 0;
+  let wasHigh = false;         // 直前サンプルがしきい値より上かどうか
 
   function handleMotion(event) {
     if (!running) return;
+    if (!event.accelerationIncludingGravity) return;
 
-    let ax = 0, ay = 0, az = 0;
-
-    // 1. まずは重力除去済みの acceleration があればそれを使う
-    if (event.acceleration && event.acceleration.x !== null) {
-      ax = event.acceleration.x;
-      ay = event.acceleration.y;
-      az = event.acceleration.z;
-    }
-    // 2. なければ includingGravity から近似的に差分をとる
-    else if (event.accelerationIncludingGravity &&
-             event.accelerationIncludingGravity.x !== null) {
-      const ag = event.accelerationIncludingGravity;
-      // 本当は端末姿勢を考慮したいが、MVPなのでざっくり
-      ax = ag.x;
-      ay = ag.y;
-      az = ag.z;
-    } else {
-      return;
-    }
+    const ag = event.accelerationIncludingGravity;
+    const ax = ag.x || 0;
+    const ay = ag.y || 0;
+    const az = ag.z || 0;
 
     // 加速度の大きさ
     const mag = Math.sqrt(ax*ax + ay*ay + az*az);
 
-    // includingGravity の場合、静止時はだいたい 9.8 前後になるので、
-    // その分をざっくり引いて「変化分」だけ見る
-    let dyn = mag;
-    if (event.acceleration == null || event.acceleration.x === null) {
-      dyn = Math.abs(mag - 9.8);  // 9.8 m/s^2 を重力として近似
-    }
+    // 静止時 9.8 m/s^2 を引いて「変化分」だけを見る（ざっくり）
+    const dyn = Math.abs(mag - 9.8);
 
     // 簡易移動平均
     buffer.push(dyn);
@@ -122,21 +103,23 @@
 
     const now = Date.now();
 
-    // しきい値を下から上に超えた瞬間をピークとみなす
-    if (filtered > THRESHOLD && lastValue <= THRESHOLD) {
-      const dt = now - lastPeakTime;
+    // しきい値を「下から上に」超えた瞬間だけを1ステップ候補とする
+    if (filtered > THRESHOLD && !wasHigh) {
+      const dt = now - lastStepTime;
 
-      if (dt > MIN_INTERVAL && dt < MAX_INTERVAL) {
+      if (dt > MIN_INTERVAL) {
         stepCount++;
+        lastStepTime = now;
         document.getElementById('steps').textContent = stepCount;
-        lastPeakTime = now;
-      } else if (lastPeakTime === 0) {
-        // 初回だけ基準時間として記録する
-        lastPeakTime = now;
       }
+
+      wasHigh = true;
     }
 
-    lastValue = filtered;
+    // 振動が収まって値が十分下がったら、再び山待ち状態に戻す
+    if (filtered < THRESHOLD * 0.5) {
+      wasHigh = false;
+    }
   }
 
   function startMotion() {
@@ -173,9 +156,10 @@
   document.getElementById('start').addEventListener('click', () => {
     stepCount = 0;
     document.getElementById('steps').textContent = stepCount;
-    lastPeakTime = 0;
-    lastValue = 0;
+    lastStepTime = 0;
+    wasHigh = false;
     buffer.length = 0;
+    document.getElementById('steps').textContent = stepCount;
     startMotion();
   });
 
