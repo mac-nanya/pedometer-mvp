@@ -91,23 +91,72 @@
   const DT_HISTORY_SIZE = 5;
   const DT_STD_MAX = 200;   // ms これよりバラバラなら「歩行らしくない」とみなす
 
+  // 手振り判定用パラメータ
+  const PORTRAIT_GRAVITY_Y_MIN = 0.7; // |ny| がこれ以上なら「縦向きっぽい」
+  const VERT_MAX = 0.8;              // 垂直方向の動きがこれ以下
+  const HORIZ_MIN = 1.5;             // 水平方向の動きがこれ以上 → 左右ブンブン
+
   function handleMotion(event) {
     if (!running) return;
     if (!event.accelerationIncludingGravity) return;
 
     const ag = event.accelerationIncludingGravity;
-    const ax = ag.x || 0;
-    const ay = ag.y || 0;
-    const az = ag.z || 0;
+    const axg = ag.x || 0;
+    const ayg = ag.y || 0;
+    const azg = ag.z || 0;
 
-    // 加速度の大きさ
-    const mag = Math.sqrt(ax*ax + ay*ay + az*az);
+    // 重力方向の単位ベクトル g_hat を求める
+    const gmag = Math.sqrt(axg*axg + ayg*ayg + azg*azg) || 1.0;
+    const gx = axg / gmag;
+    const gy = ayg / gmag;
+    const gz = azg / gmag;
 
-    // 静止時 9.8 m/s^2 を引いて「変化分」だけを見る（ざっくり）
-    const dyn = Math.abs(mag - 9.8);
+    // 「縦向きっぽいか」を判定（重力が y 軸方向に強く出ているか）
+    const isPortraitLike = Math.abs(gy) > PORTRAIT_GRAVITY_Y_MIN;
 
-    // 簡易移動平均
-    buffer.push(dyn);
+    // 線形加速度（重力除去）を取得
+    let lax = 0, lay = 0, laz = 0;
+
+    if (event.acceleration && event.acceleration.x != null) {
+      // acceleration があればそのまま使う
+      lax = event.acceleration.x || 0;
+      lay = event.acceleration.y || 0;
+      laz = event.acceleration.z || 0;
+    } else {
+      // なければ includingGravity から 9.8 m/s^2 分を引く簡易版
+      const g0 = 9.8;
+      lax = axg - gx * g0;
+      lay = ayg - gy * g0;
+      laz = azg - gz * g0;
+    }
+
+    // 動的加速度の大きさ
+    const dynMag = Math.sqrt(lax*lax + lay*lay + laz*laz);
+
+    // 垂直成分（重力方向への投影）と水平成分
+    const a_vert = lax*gx + lay*gy + laz*gz;  // スカラー
+    const hx = lax - a_vert * gx;
+    const hy = lay - a_vert * gy;
+    const hz = laz - a_vert * gz;
+    const a_horiz = Math.sqrt(hx*hx + hy*hy + hz*hz);
+
+    // 「縦向き & 垂直は小さい & 水平は大きい」→ 左右ブンブンの手振りとみなす
+    const isHorizontalShake =
+      isPortraitLike &&
+      Math.abs(a_vert) < VERT_MAX &&
+      a_horiz > HORIZ_MIN;
+
+    // 左右ブンブン中は、歩行モードに入らないようにする（候補と履歴をリセット気味に）
+    if (isHorizontalShake && !isWalking) {
+      // 手で振っているだけとみなして候補を捨てる
+      candidateSteps = 0;
+      dtHistory.length = 0;
+      // ピーク検出も無効化（次の山待ち）
+      wasHigh = false;
+    }
+
+    // 以降は「動的加速度の大きさ dynMag」を使って歩数検出（従来ロジック）
+    buffer.push(dynMag);
     if (buffer.length > N) buffer.shift();
     const filtered = buffer.reduce((a, b) => a + b, 0) / buffer.length;
 
@@ -130,36 +179,43 @@
       } else {
         // 歩行らしい間隔か？
         if (dt >= MIN_INTERVAL && dt <= MAX_INTERVAL) {
-          // 間隔の履歴に追加
-          dtHistory.push(dt);
-          if (dtHistory.length > DT_HISTORY_SIZE) dtHistory.shift();
+          // 左右ブンブン中は、ここでもステップ扱いしない（手振り除外）
+          if (isHorizontalShake && !isWalking) {
+            // まだ歩行モードでないときは完全に無視
+            candidateSteps = 0;
+            dtHistory.length = 0;
+          } else {
+            // 間隔の履歴に追加
+            dtHistory.push(dt);
+            if (dtHistory.length > DT_HISTORY_SIZE) dtHistory.shift();
 
-          // リズムのバラつきを計算
-          const mean = dtHistory.reduce((a, b) => a + b, 0) / dtHistory.length;
-          const variance = dtHistory.reduce((a, b) => a + (b - mean) * (b - mean), 0) / dtHistory.length;
-          const std = Math.sqrt(variance);
+            // リズムのバラつきを計算
+            const mean = dtHistory.reduce((a, b) => a + b, 0) / dtHistory.length;
+            const variance = dtHistory.reduce((a, b) => a + (b - mean) * (b - mean), 0) / dtHistory.length;
+            const std = Math.sqrt(variance);
 
-          if (std < DT_STD_MAX) {
-            // 歩行らしい間隔としてカウント
-            if (!isWalking) {
-              candidateSteps++;
-              // 一定数たまったら歩行モードへ
-              if (candidateSteps >= WALK_START_STEPS) {
-                isWalking = true;
-                // これまでの候補ステップを一気に歩数に反映
-                stepCount += candidateSteps;
+            if (std < DT_STD_MAX) {
+              // 歩行らしい間隔としてカウント
+              if (!isWalking) {
+                candidateSteps++;
+                // 一定数たまったら歩行モードへ
+                if (candidateSteps >= WALK_START_STEPS) {
+                  isWalking = true;
+                  // これまでの候補ステップを一気に歩数に反映
+                  stepCount += candidateSteps;
+                  document.getElementById('steps').textContent = stepCount;
+                }
+              } else {
+                // すでに歩行モードなら即カウント
+                stepCount++;
                 document.getElementById('steps').textContent = stepCount;
               }
             } else {
-              // すでに歩行モードなら即カウント
-              stepCount++;
-              document.getElementById('steps').textContent = stepCount;
-            }
-          } else {
-            // リズムがバラバラ → 手振りなどと判断してリセット寄りの挙動
-            if (!isWalking) {
-              candidateSteps = 0;
-              dtHistory.length = 0;
+              // リズムがバラバラ → 手振りなどと判断してリセット寄りの挙動
+              if (!isWalking) {
+                candidateSteps = 0;
+                dtHistory.length = 0;
+              }
             }
           }
         } else {
@@ -234,4 +290,3 @@
 </script>
 </body>
 </html>
-
