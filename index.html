@@ -68,98 +68,121 @@
     ※ 画面を閉じると計測は止まります（MVPデモ仕様）。
   </p>
 
-  <script>
-    let stepCount = 0;
-    let running = false;
+<script>
+  let stepCount = 0;
+  let running = false;
 
-    const buffer = [];
-    const N = 5;                 // 移動平均のサンプル数
-    const THRESHOLD = 1.2;       // しきい値（環境に応じて調整）
-    const MIN_INTERVAL = 300;    // 1歩の最短間隔 (ms)
-    const MAX_INTERVAL = 1200;   // 1歩の最長間隔 (ms)
-    let lastValue = 0;
-    let lastPeakTime = 0;
+  const buffer = [];
+  const N = 5;                 // 移動平均のサンプル数
 
-    function handleMotion(event) {
-      if (!running) return;
-      if (!event.accelerationIncludingGravity) return;
+  // acceleration を使う前提で、少し高めのしきい値にする
+  const THRESHOLD = 2.0;       // (m/s^2) 歩行で越えるくらいに調整
+  const MIN_INTERVAL = 300;    // 1歩の最短間隔 (ms)
+  const MAX_INTERVAL = 1200;   // 1歩の最長間隔 (ms)
+  let lastValue = 0;
+  let lastPeakTime = 0;
 
-      const acc = event.accelerationIncludingGravity;
-      const ax = acc.x || 0;
-      const ay = acc.y || 0;
-      const az = acc.z || 0;
+  function handleMotion(event) {
+    if (!running) return;
 
-      // 加速度の大きさ
-      const mag = Math.sqrt(ax*ax + ay*ay + az*az);
+    let ax = 0, ay = 0, az = 0;
 
-      // 簡易移動平均
-      buffer.push(mag);
-      if (buffer.length > N) buffer.shift();
-      const filtered = buffer.reduce((a, b) => a + b, 0) / buffer.length;
+    // 1. まずは重力除去済みの acceleration があればそれを使う
+    if (event.acceleration && event.acceleration.x !== null) {
+      ax = event.acceleration.x;
+      ay = event.acceleration.y;
+      az = event.acceleration.z;
+    }
+    // 2. なければ includingGravity から近似的に差分をとる
+    else if (event.accelerationIncludingGravity &&
+             event.accelerationIncludingGravity.x !== null) {
+      const ag = event.accelerationIncludingGravity;
+      // 本当は端末姿勢を考慮したいが、MVPなのでざっくり
+      ax = ag.x;
+      ay = ag.y;
+      az = ag.z;
+    } else {
+      return;
+    }
 
-      const now = Date.now();
+    // 加速度の大きさ
+    const mag = Math.sqrt(ax*ax + ay*ay + az*az);
 
-      // しきい値を下から上に超えた瞬間をピークとみなす
-      if (filtered > THRESHOLD && lastValue <= THRESHOLD) {
-        const dt = now - lastPeakTime;
+    // includingGravity の場合、静止時はだいたい 9.8 前後になるので、
+    // その分をざっくり引いて「変化分」だけ見る
+    let dyn = mag;
+    if (event.acceleration == null || event.acceleration.x === null) {
+      dyn = Math.abs(mag - 9.8);  // 9.8 m/s^2 を重力として近似
+    }
 
-        if (dt > MIN_INTERVAL && dt < MAX_INTERVAL) {
-          stepCount++;
-          document.getElementById('steps').textContent = stepCount;
-          lastPeakTime = now;
+    // 簡易移動平均
+    buffer.push(dyn);
+    if (buffer.length > N) buffer.shift();
+    const filtered = buffer.reduce((a, b) => a + b, 0) / buffer.length;
+
+    const now = Date.now();
+
+    // しきい値を下から上に超えた瞬間をピークとみなす
+    if (filtered > THRESHOLD && lastValue <= THRESHOLD) {
+      const dt = now - lastPeakTime;
+
+      if (dt > MIN_INTERVAL && dt < MAX_INTERVAL) {
+        stepCount++;
+        document.getElementById('steps').textContent = stepCount;
+        lastPeakTime = now;
+      } else if (lastPeakTime === 0) {
+        // 初回だけ基準時間として記録する
+        lastPeakTime = now;
+      }
+    }
+
+    lastValue = filtered;
+  }
+
+  function startMotion() {
+    if (running) return;
+
+    if (typeof DeviceMotionEvent !== 'undefined' &&
+        typeof DeviceMotionEvent.requestPermission === 'function') {
+
+      DeviceMotionEvent.requestPermission().then(response => {
+        if (response === 'granted') {
+          window.addEventListener('devicemotion', handleMotion);
+          running = true;
+        } else {
+          alert('モーションセンサーの利用が許可されませんでした。');
         }
-      }
+      }).catch(err => {
+        console.error(err);
+        alert('モーションセンサーの利用許可でエラーが発生しました。');
+      });
 
-      lastValue = filtered;
+    } else if ('DeviceMotionEvent' in window) {
+      window.addEventListener('devicemotion', handleMotion);
+      running = true;
+    } else {
+      alert('このブラウザはモーションセンサーに対応していません。');
     }
+  }
 
-    function startMotion() {
-      // すでに開始していれば何もしない
-      if (running) return;
+  function stopMotion() {
+    running = false;
+    window.removeEventListener('devicemotion', handleMotion);
+  }
 
-      // iOS 13+ のパーミッション対応
-      if (typeof DeviceMotionEvent !== 'undefined' &&
-          typeof DeviceMotionEvent.requestPermission === 'function') {
+  document.getElementById('start').addEventListener('click', () => {
+    stepCount = 0;
+    document.getElementById('steps').textContent = stepCount;
+    lastPeakTime = 0;
+    lastValue = 0;
+    buffer.length = 0;
+    startMotion();
+  });
 
-        DeviceMotionEvent.requestPermission().then(response => {
-          if (response === 'granted') {
-            window.addEventListener('devicemotion', handleMotion);
-            running = true;
-          } else {
-            alert('モーションセンサーの利用が許可されませんでした。');
-          }
-        }).catch(err => {
-          console.error(err);
-          alert('モーションセンサーの利用許可でエラーが発生しました。');
-        });
-
-      } else if ('DeviceMotionEvent' in window) {
-        // Android や古い iOS
-        window.addEventListener('devicemotion', handleMotion);
-        running = true;
-      } else {
-        alert('このブラウザはモーションセンサーに対応していません。');
-      }
-    }
-
-    function stopMotion() {
-      running = false;
-      window.removeEventListener('devicemotion', handleMotion);
-    }
-
-    document.getElementById('start').addEventListener('click', () => {
-      stepCount = 0;
-      document.getElementById('steps').textContent = stepCount;
-      lastPeakTime = 0;
-      lastValue = 0;
-      buffer.length = 0;
-      startMotion();
-    });
-
-    document.getElementById('stop').addEventListener('click', () => {
-      stopMotion();
-    });
-  </script>
+  document.getElementById('stop').addEventListener('click', () => {
+    stopMotion();
+  });
+</script>
 </body>
 </html>
 
